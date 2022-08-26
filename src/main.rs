@@ -5,7 +5,7 @@ use image::imageops::FilterType;
 use log::{error, info, warn};
 use rocket::{
   serde::json::{json, Value},
-  tokio,
+  tokio::{self, fs},
 };
 use std::{hash::Hasher, io::Write, path::Path, path::PathBuf, time::Duration};
 use twox_hash::XxHash64;
@@ -40,22 +40,24 @@ async fn main() -> Result<()> {
     })
     .init();
 
-  let storage_path =
-    std::env::var("PICVOTER_STORAGE_DIR").unwrap_or_else(|_| "./storage".to_string());
-  let imports_path = PathBuf::from(&storage_path).join("imports");
-  let raws_path = PathBuf::from(&storage_path).join("raws");
-  let resized_path = PathBuf::from(&storage_path).join("resized");
+  let imports_path =
+    std::env::var("VOTER_IMPORTS_DIR").unwrap_or_else(|_| "./storage/imports".to_string());
+  let raws_path = std::env::var("VOTER_RAWS_DIR").unwrap_or_else(|_| "./storage/raws".to_string());
+  let resized_path =
+    std::env::var("VOTER_RESIZED_DIR").unwrap_or_else(|_| "./storage/resized".to_string());
 
-  tokio::fs::create_dir_all(&imports_path).await?;
-  tokio::fs::create_dir_all(&raws_path).await?;
-  tokio::fs::create_dir_all(&resized_path).await?;
+  fs::create_dir_all(&imports_path).await?;
+  fs::create_dir_all(&raws_path).await?;
+  fs::create_dir_all(&resized_path).await?;
 
   let r = rocket::build()
     .mount("/", rocket::routes![index, vote])
     .ignite()
     .await?;
 
-  tokio::spawn(async move { import_task(imports_path, raws_path, resized_path).await });
+  tokio::spawn(async move {
+    import_task(imports_path.into(), raws_path.into(), resized_path.into()).await
+  });
 
   let _ = r.launch().await?;
   Ok(())
@@ -74,7 +76,8 @@ async fn import_task(imports_path: PathBuf, raws_path: PathBuf, resized_path: Pa
 }
 
 async fn check_imports(imports_path: &Path, raws_path: &Path, resized_path: &Path) -> Result<()> {
-  let mut files = tokio::fs::read_dir(&imports_path).await?;
+  let mut files = fs::read_dir(&imports_path).await?;
+
   while let Some(file) = files.next_entry().await? {
     let path = file.path();
     if !path.is_file() {
@@ -90,7 +93,7 @@ async fn check_imports(imports_path: &Path, raws_path: &Path, resized_path: &Pat
     };
 
     let ext = ext.to_string_lossy().to_string();
-    let data = tokio::fs::read(file.path()).await?;
+    let data = fs::read(file.path()).await?;
     let mut hasher = XxHash64::with_seed(0);
     hasher.write(&data);
 
@@ -98,19 +101,19 @@ async fn check_imports(imports_path: &Path, raws_path: &Path, resized_path: &Pat
     info!("Found new file: {file:?} with hash {file_hash}");
 
     let new_file_name = format!("{file_hash}.{ext}");
-    let new_path = raws_path.to_owned().join(&new_file_name);
-    if new_path.exists() {
-      info!("File {new_path:?} was already imported ({file:?}), removing");
-      tokio::fs::remove_file(&path).await?;
+    let raw_image_path = raws_path.to_owned().join(&new_file_name);
+    if raw_image_path.exists() {
+      info!("File {raw_image_path:?} was already imported ({file:?}), skipping");
       continue;
     }
 
-    tokio::fs::rename(&path, &new_path).await?;
+    fs::copy(&path, &raw_image_path).await?;
 
-    let resized_path = resized_path.join(&new_file_name);
-    let img = image::open(&new_path)?;
-    let img = img.resize_to_fill(1080, 1080, FilterType::Lanczos3);
-    img.save_with_format(&resized_path, image::ImageFormat::Jpeg);
+    let resized_filename = format!("{file_hash}.jpg");
+    let resized_path = resized_path.join(&resized_filename);
+    let img = image::open(&raw_image_path)?;
+    let resized_img = img.resize_to_fill(1080, 1080, FilterType::Lanczos3);
+    resized_img.save(&resized_path)?;
   }
 
   Ok(())
