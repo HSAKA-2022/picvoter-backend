@@ -3,11 +3,9 @@ use anyhow::Result;
 use console::style;
 use image::imageops::FilterType;
 use log::{error, info, warn};
-use rocket::{
-  serde::json::{json, Value},
-  tokio::{self, fs},
-};
-use std::{hash::Hasher, io::Write, path::Path, path::PathBuf, time::Duration};
+use rocket::serde::json::{json, Value};
+use std::{env, hash::Hasher, io::Write, path::Path, path::PathBuf, time::Duration};
+use tokio::{self, fs};
 use twox_hash::XxHash64;
 
 #[rocket::get("/")]
@@ -20,7 +18,7 @@ fn vote() -> Value {
   json!({ "success": true })
 }
 
-#[rocket::main]
+#[tokio::main]
 async fn main() -> Result<()> {
   env_logger::Builder::new()
     .target(env_logger::Target::Stderr)
@@ -40,11 +38,16 @@ async fn main() -> Result<()> {
     })
     .init();
 
+  let db_path =
+    env::var("VOTER_DB_PATH").unwrap_or_else(|_| "sqlite:storage/db.sqlite?mode=rwc".to_string());
+  let pool = sqlx::SqlitePool::connect(&db_path).await?;
+  sqlx::migrate!().run(&pool).await?;
+
   let imports_path =
-    std::env::var("VOTER_IMPORTS_DIR").unwrap_or_else(|_| "./storage/imports".to_string());
-  let raws_path = std::env::var("VOTER_RAWS_DIR").unwrap_or_else(|_| "./storage/raws".to_string());
+    env::var("VOTER_IMPORTS_DIR").unwrap_or_else(|_| "./storage/imports".to_string());
+  let raws_path = env::var("VOTER_RAWS_DIR").unwrap_or_else(|_| "./storage/raws".to_string());
   let resized_path =
-    std::env::var("VOTER_RESIZED_DIR").unwrap_or_else(|_| "./storage/resized".to_string());
+    env::var("VOTER_RESIZED_DIR").unwrap_or_else(|_| "./storage/resized".to_string());
 
   fs::create_dir_all(&imports_path).await?;
   fs::create_dir_all(&raws_path).await?;
