@@ -89,12 +89,14 @@ OFFSET ?1
     "#,
     skip
   )
-  .fetch_one(&mut db)
+  .fetch_optional(&mut db)
   .await?;
 
-  if result.id.is_none() || result.hash.is_none() {
+  if result.is_none() {
     return Ok(None);
   }
+
+  let result = result.unwrap();
 
   Ok(Some(ImageEntry {
     id: result.id.unwrap(),
@@ -122,9 +124,14 @@ FROM images
 WHERE id = ?1"#,
     req.id
   )
-  .fetch_one(&mut db)
+  .fetch_optional(&mut db)
   .await?;
 
+  if record.is_none() {
+    return Ok((Status::NotFound, json!({ "error": "not found" })));
+  }
+
+  let record = record.unwrap();
   let (upvotes, downvotes) = if req.value == 1 {
     (
       record.upvotes.unwrap_or_default() + 1,
