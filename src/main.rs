@@ -183,38 +183,47 @@ VALUES ( ?1, ?2, ?3 )
 }
 
 async fn check_imports(config: &Config, db: &SqlitePool) -> Result<()> {
-  let mut files = fs::read_dir(&config.imports_path).await?;
+  let mut walk_dirs = vec![config.imports_path.clone()];
+  while !walk_dirs.is_empty() {
+    let dir = walk_dirs.pop().unwrap();
+    let mut files = fs::read_dir(&dir).await?;
 
-  while let Some(file) = files.next_entry().await? {
-    let path = file.path();
-    if !path.is_file() {
-      continue;
-    }
-
-    let ext = match path.extension() {
-      Some(ext) => ext,
-      None => {
-        warn!("No extension found for file {file:?}");
+    while let Some(file) = files.next_entry().await? {
+      let path = file.path();
+      if path.is_dir() {
+        walk_dirs.push(path.to_owned());
         continue;
       }
-    };
 
-    let ext = ext.to_string_lossy().to_string();
-    let data = fs::read(file.path()).await?;
-    let mut hasher = XxHash64::with_seed(0);
-    hasher.write(&data);
+      if !path.is_file() {
+        continue;
+      }
 
-    let file_hash = hasher.finish();
-    info!("Found new file: {file:?} with hash {file_hash}");
+      let ext = match path.extension() {
+        Some(ext) => ext,
+        None => {
+          warn!("No extension found for file {file:?}");
+          continue;
+        }
+      };
 
-    let new_file_name = format!("{file_hash}.{ext}");
-    let raw_image_path = config.raws_path.to_owned().join(&new_file_name);
-    if raw_image_path.exists() {
-      info!("File {raw_image_path:?} was already imported ({file:?}), skipping");
-      continue;
+      let ext = ext.to_string_lossy().to_string();
+      let data = fs::read(file.path()).await?;
+      let mut hasher = XxHash64::with_seed(0);
+      hasher.write(&data);
+
+      let file_hash = hasher.finish();
+      info!("Found new file: {file:?} with hash {file_hash}");
+
+      let new_file_name = format!("{file_hash}.{ext}");
+      let raw_image_path = config.raws_path.to_owned().join(&new_file_name);
+      if raw_image_path.exists() {
+        info!("File {raw_image_path:?} was already imported ({file:?}), skipping");
+        continue;
+      }
+
+      save_image(config, db, &path, &raw_image_path, file_hash).await?;
     }
-
-    save_image(config, db, &path, &raw_image_path, file_hash).await?;
   }
 
   Ok(())
