@@ -2,6 +2,7 @@
 use console::style;
 use image::imageops::FilterType;
 use log::{error, info, warn};
+use rand::Rng;
 use rocket::{
   fs::FileServer,
   http::Status,
@@ -9,9 +10,10 @@ use rocket::{
   serde::json::{json, Json, Value},
   Request, State,
 };
+use rocket_cors::{AllowedHeaders, AllowedMethods, AllowedOrigins};
 use serde::{Deserialize, Serialize};
 use sqlx::{Acquire, SqlitePool};
-use std::{env, hash::Hasher, io::Write, path::Path, path::PathBuf, time::Duration};
+use std::{env, hash::Hasher, io::Write, path::Path, path::PathBuf, str::FromStr, time::Duration};
 use tokio::{self, fs};
 use twox_hash::XxHash64;
 
@@ -41,22 +43,63 @@ struct ImageEntry {
   hash: String,
 }
 
-#[rocket::get("/?<count>")]
-async fn index(db: &State<SqlitePool>, count: Option<u8>) -> Result<(Status, Value)> {
-  let count = count.unwrap_or(1);
-  if count > 10 {
-    return Ok((
-      Status::BadRequest,
-      json!({ "error": "count must be less than 10" }),
-    ));
+#[rocket::get("/")]
+async fn index(db: &State<SqlitePool>) -> Result<(Status, Value)> {
+  let next = get_next_pic(db).await?;
+  if next.is_none() {
+    return Ok((Status::InternalServerError, json!({ "error": "no picture found" })));
   }
 
+  let next = next.unwrap();
+  Ok((Status::Ok, json!(next)))
+}
+
+fn biased_random(max: i32) -> i32 {
+  if max == 0 {
+    return 0;
+  }
+
+  let mut rng = rand::thread_rng();
+
+  let n = 4f32;
+  let unif: f32 = rng.gen();
+
+  let one_over2_n = 1.0 / f32::powf(2.0, n);
+  let one_over_xplus1_n = 1.0 / f32::powf(unif + 1.0, n);
+
+  let random = (one_over_xplus1_n - one_over2_n) / (1.0 - one_over2_n);
+  (random * max as f32) as i32
+}
+
+async fn get_next_pic(db: &SqlitePool) -> Result<Option<ImageEntry>> {
   let mut db = db.acquire().await?;
-  let result = sqlx::query_as!(ImageEntry, r#"SELECT id, hash FROM images LIMIT ?1"#, count,)
-    .fetch_all(&mut db)
+  let count = sqlx::query!("SELECT COUNT(*) AS count FROM images WHERE sorting >= -3")
+    .fetch_one(&mut db)
     .await?;
 
-  Ok((Status::Ok, json!(result)))
+  let skip = biased_random(count.count);
+  let result = sqlx::query!(
+    r#"
+SELECT id, hash
+FROM images
+WHERE sorting >= -3
+ORDER BY confidence ASC
+LIMIT 1
+OFFSET ?1
+    "#,
+    skip
+  )
+  .fetch_one(&mut db)
+  .await?;
+
+  if result.id.is_none() || result.hash.is_none() {
+    return Ok(None);
+  }
+
+  Ok(Some(ImageEntry {
+    id: result.id.unwrap(),
+    hash: result.hash.unwrap(),
+  }))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -69,7 +112,14 @@ struct VoteRequest {
 async fn vote(db: &State<SqlitePool>, req: Json<VoteRequest>) -> Result<(Status, Value)> {
   let mut db = db.acquire().await?;
   let record = sqlx::query!(
-    r#"SELECT upvotes, downvotes FROM images WHERE id = ?1"#,
+    r#"
+SELECT
+  upvotes,
+  downvotes,
+  sorting,
+  confidence
+FROM images
+WHERE id = ?1"#,
     req.id
   )
   .fetch_one(&mut db)
@@ -92,16 +142,46 @@ async fn vote(db: &State<SqlitePool>, req: Json<VoteRequest>) -> Result<(Status,
     ));
   };
 
+  let new_sorting = calc_sort_value(upvotes, downvotes);
+  let new_confidence = ((0.5 - new_sorting) * ((upvotes + downvotes) as f32 / 10.0)).abs();
+
   let _ = sqlx::query!(
-    r#"UPDATE images SET upvotes = ?1, downvotes = ?2 WHERE id = ?3"#,
+    r#"
+UPDATE images
+SET
+  upvotes = ?1,
+  downvotes = ?2,
+  sorting = ?3,
+  confidence = ?4
+WHERE
+  id = ?5"#,
     upvotes,
     downvotes,
+    new_sorting,
+    new_confidence,
     req.id
   )
   .execute(&mut db)
   .await?;
 
   Ok((Status::Ok, json!({ "success": true })))
+}
+
+fn calc_sort_value(ups: i64, downs: i64) -> f32 {
+  if ups == 0 {
+    if downs == 0 {
+      return 0.5;
+    }
+
+    return (downs * -1) as f32;
+  }
+
+  let n = (ups + downs) as f32;
+  let z = 1.64485; //1.0 = 85%, 1.6 = 95%
+  let phat = ups as f32 / n;
+
+  (phat + z * z / (2.0 * n) - z * f32::sqrt((phat * (1.0 - phat) + z * z / (4.0 * n)) / n))
+    / (1.0 + z * z / n)
 }
 
 #[derive(Debug, Clone)]
@@ -116,7 +196,7 @@ async fn main() -> Result<()> {
   env_logger::Builder::new()
     .target(env_logger::Target::Stderr)
     .filter_level(log::LevelFilter::Info)
-    .parse_env("PICVOTER_LOG")
+    .parse_env("VOTER_LOG")
     .format(|buf, record| {
       let level = match record.level() {
         log::Level::Info => style("info: ").bold().blue(),
@@ -151,6 +231,18 @@ async fn main() -> Result<()> {
   fs::create_dir_all(&config.imports_path).await?;
   fs::create_dir_all(&config.raws_path).await?;
   fs::create_dir_all(&config.resized_path).await?;
+
+  let cors = rocket_cors::CorsOptions {
+    allowed_origins: AllowedOrigins::all(),
+    allowed_methods: ["Get", "Post", "Head"]
+      .iter()
+      .map(|s| FromStr::from_str(s).unwrap())
+      .collect(),
+    allowed_headers: AllowedHeaders::all(),
+    allow_credentials: true,
+    ..Default::default()
+  }
+  .to_cors()?;
 
   let r = rocket::build()
     .manage(config.clone())

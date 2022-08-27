@@ -15,3 +15,5 @@ serde = { version = "1.0", features = ["derive"] }
 sqlx = { version = "0.6", features = [ "runtime-tokio-rustls", "sqlite" ] }
 tokio = { version = "1.18.2", features = ["full"] }
 ulid = "1.0.0"
+rocket_cors = "0.5.1"
+rand = "0.8.5"
