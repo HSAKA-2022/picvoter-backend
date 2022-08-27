@@ -3,13 +3,14 @@ use console::style;
 use image::imageops::FilterType;
 use log::{error, info, warn};
 use rocket::{
+  fs::FileServer,
   http::Status,
   response::{self, Responder},
-  serde::json::{json, Value},
-  Request, State, fs::FileServer,
+  serde::json::{json, Json, Value},
+  Request, State,
 };
-use serde::Serialize;
-use sqlx::SqlitePool;
+use serde::{Deserialize, Serialize};
+use sqlx::{Acquire, SqlitePool};
 use std::{env, hash::Hasher, io::Write, path::Path, path::PathBuf, time::Duration};
 use tokio::{self, fs};
 use twox_hash::XxHash64;
@@ -51,24 +52,56 @@ async fn index(db: &State<SqlitePool>, count: Option<u8>) -> Result<(Status, Val
   }
 
   let mut db = db.acquire().await?;
-  let result = sqlx::query_as!(
-    ImageEntry,
-    r#"
-SELECT id, hash
-FROM images
-LIMIT ?1
-    "#,
-    count,
-  )
-  .fetch_all(&mut db)
-  .await?;
+  let result = sqlx::query_as!(ImageEntry, r#"SELECT id, hash FROM images LIMIT ?1"#, count,)
+    .fetch_all(&mut db)
+    .await?;
 
   Ok((Status::Ok, json!(result)))
 }
 
-#[rocket::post("/vote")]
-fn vote() -> Value {
-  json!({ "success": true })
+#[derive(Debug, Clone, Deserialize)]
+struct VoteRequest {
+  id: String,
+  value: i8,
+}
+
+#[rocket::post("/vote", data = "<req>")]
+async fn vote(db: &State<SqlitePool>, req: Json<VoteRequest>) -> Result<(Status, Value)> {
+  let mut db = db.acquire().await?;
+  let record = sqlx::query!(
+    r#"SELECT upvotes, downvotes FROM images WHERE id = ?1"#,
+    req.id
+  )
+  .fetch_one(&mut db)
+  .await?;
+
+  let (upvotes, downvotes) = if req.value == 1 {
+    (
+      record.upvotes.unwrap_or_default() + 1,
+      record.downvotes.unwrap_or_default(),
+    )
+  } else if req.value == -1 {
+    (
+      record.upvotes.unwrap_or_default(),
+      record.downvotes.unwrap_or_default() + 1,
+    )
+  } else {
+    return Ok((
+      Status::BadRequest,
+      json!({ "error": "value must be 1 or -1" }),
+    ));
+  };
+
+  let _ = sqlx::query!(
+    r#"UPDATE images SET upvotes = ?1, downvotes = ?2 WHERE id = ?3"#,
+    upvotes,
+    downvotes,
+    req.id
+  )
+  .execute(&mut db)
+  .await?;
+
+  Ok((Status::Ok, json!({ "success": true })))
 }
 
 #[derive(Debug, Clone)]
@@ -169,15 +202,13 @@ async fn save_image(
 
   let mut conn = db.acquire().await?;
   sqlx::query!(
-    r#"
-INSERT INTO images ( id, filename, hash )
-VALUES ( ?1, ?2, ?3 )
-    "#,
+    r#"INSERT INTO images ( id, filename, hash ) VALUES ( ?1, ?2, ?3 )"#,
     image_id,
     original_filename,
     hash_str,
   )
-  .execute(&mut conn).await?;
+  .execute(&mut conn)
+  .await?;
 
   Ok(())
 }
