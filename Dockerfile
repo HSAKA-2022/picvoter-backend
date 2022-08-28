@@ -6,6 +6,6 @@ COPY . .
 RUN cargo install sqlx-cli
 RUN sqlx migrate run
 
-RUN cargo build --releaso
+RUN cargo build --release
 
 ENTRYPOINT ["./target/release/picvoter-backend"]
