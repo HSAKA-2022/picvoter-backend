@@ -1,4 +1,3 @@
-#![allow(unused)]
 use console::style;
 use image::imageops::FilterType;
 use log::{error, info, warn};
@@ -10,9 +9,9 @@ use rocket::{
   serde::json::{json, Json, Value},
   Request, State,
 };
-use rocket_cors::{AllowedHeaders, AllowedMethods, AllowedOrigins};
+use rocket_cors::{AllowedHeaders, AllowedOrigins};
 use serde::{Deserialize, Serialize};
-use sqlx::{Acquire, SqlitePool};
+use sqlx::SqlitePool;
 use std::{env, hash::Hasher, io::Write, path::Path, path::PathBuf, str::FromStr, time::Duration};
 use tokio::{self, fs};
 use twox_hash::XxHash64;
@@ -211,7 +210,6 @@ async fn main() -> Result<()> {
         log::Level::Warn => style("warn: ").bold().yellow(),
         log::Level::Debug => style("debug: ").bold().blue(),
         log::Level::Trace => style("trace: ").bold().cyan(),
-        _ => unreachable!(),
       };
 
       writeln!(buf, "{} {}", level, record.args())
@@ -256,6 +254,7 @@ async fn main() -> Result<()> {
     .manage(pool.clone())
     .mount("/", rocket::routes![index, vote])
     .mount("/files", FileServer::from(&resized_path))
+    .attach(cors.into())
     .ignite()
     .await?;
 
