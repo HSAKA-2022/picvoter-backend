@@ -1,8 +1,9 @@
 FROM rustlang/rust:nightly
 
 USER 1001
+RUN mkdir -p /app/storage
+WORKDIR /app
 COPY . .
-RUN touch /storage/test.sqlite
 RUN cargo install sqlx-cli
 RUN sqlx migrate run
 
