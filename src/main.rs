@@ -254,7 +254,7 @@ async fn main() -> Result<()> {
     .manage(pool.clone())
     .mount("/", rocket::routes![index, vote])
     .mount("/files", FileServer::from(&resized_path))
-    .attach(cors.into())
+    .attach(cors)
     .ignite()
     .await?;
 
