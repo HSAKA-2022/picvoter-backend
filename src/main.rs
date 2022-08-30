@@ -16,6 +16,8 @@ use std::{env, hash::Hasher, io::Write, path::Path, path::PathBuf, str::FromStr,
 use tokio::{self, fs};
 use twox_hash::XxHash64;
 
+use rocket::futures::TryStreamExt;
+
 #[derive(Debug)]
 pub struct Error(pub anyhow::Error);
 
@@ -293,11 +295,9 @@ async fn resize_all_images(db: &State<SqlitePool>) -> Result<(Status, Value)> {
     imports_path: imports_path.into(),
     resized_path: resized_path.clone().into(),
   };
-  let records = sqlx::query!(r#"SELECT id, filename, hash FROM images"#,)
-    .fetch_optional(&mut conn)
-    .await?;
+  let mut records = sqlx::query!(r#"SELECT id, filename, hash FROM images"#,).fetch(&mut conn);
 
-  for record in records {
+  while let Some(record) = records.try_next().await? {
     let mut split = record.filename.split(".");
     let raw_image_path = config
       .raws_path
