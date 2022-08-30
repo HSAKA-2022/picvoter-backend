@@ -301,7 +301,7 @@ async fn resize_all_images(db: &State<SqlitePool>) -> Result<(Status, Value)> {
     let mut split = record.filename.split(".");
     let raw_image_path = config
       .raws_path
-      .join(record.hash.to_string() + "." + split.nth(1).unwrap());
+      .join(record.hash.to_string() + "." + split.nth(1).unwrap().to_lowercase().as_str());
     info!("Resizing image: {}", &raw_image_path.clone().display());
     resize_img(
       &config,
