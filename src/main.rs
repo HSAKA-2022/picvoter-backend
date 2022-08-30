@@ -298,7 +298,10 @@ async fn resize_all_images(db: &State<SqlitePool>) -> Result<(Status, Value)> {
     .await?;
 
   for record in records {
-    let raw_image_path = config.raws_path.join(record.hash.to_string() + ".png");
+    let mut split = record.filename.split(".");
+    let raw_image_path = config
+      .raws_path
+      .join(record.hash.to_string() + "." + split.nth(1).unwrap());
     info!("Resizing image: {}", &raw_image_path.clone().display());
     resize_img(
       &config,
@@ -381,11 +384,11 @@ async fn check_imports(config: &Config, db: &SqlitePool) -> Result<()> {
 
       let ext = ext.to_string_lossy().to_string().to_lowercase();
       match ext.as_str() {
-        "jpg" | "jpeg" => {},
+        "jpg" | "jpeg" => {}
         other => {
           warn!("skipping extension {other}");
           continue;
-        },
+        }
       };
 
       let data = fs::read(file.path()).await?;
