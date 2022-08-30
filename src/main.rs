@@ -379,7 +379,15 @@ async fn check_imports(config: &Config, db: &SqlitePool) -> Result<()> {
         }
       };
 
-      let ext = ext.to_string_lossy().to_string();
+      let ext = ext.to_string_lossy().to_string().to_lowercase();
+      match ext.as_str() {
+        "jpg" | "jpeg" => {},
+        other => {
+          warn!("skipping extension {other}");
+          continue;
+        },
+      };
+
       let data = fs::read(file.path()).await?;
       let mut hasher = XxHash64::with_seed(0);
       hasher.write(&data);
