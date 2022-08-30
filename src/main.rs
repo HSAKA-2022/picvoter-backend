@@ -46,7 +46,10 @@ struct ImageEntry {
 async fn index(db: &State<SqlitePool>) -> Result<(Status, Value)> {
   let next = get_next_pic(db).await?;
   if next.is_none() {
-    return Ok((Status::InternalServerError, json!({ "error": "no picture found" })));
+    return Ok((
+      Status::InternalServerError,
+      json!({ "error": "no picture found" }),
+    ));
   }
 
   let next = next.unwrap();
@@ -252,7 +255,7 @@ async fn main() -> Result<()> {
   let r = rocket::build()
     .manage(config.clone())
     .manage(pool.clone())
-    .mount("/", rocket::routes![index, vote])
+    .mount("/", rocket::routes![index, vote, resize_all_images])
     .mount("/files", FileServer::from(&resized_path))
     .attach(cors)
     .ignite()
@@ -274,6 +277,40 @@ async fn main() -> Result<()> {
   Ok(())
 }
 
+#[rocket::post("/resize_all")]
+async fn resize_all_images(db: &State<SqlitePool>) -> Result<(Status, Value)> {
+  let mut conn = db.acquire().await?;
+
+  info!("Resizing all Images!");
+  let imports_path =
+    env::var("VOTER_IMPORTS_DIR").unwrap_or_else(|_| "./storage/imports".to_string());
+  let raws_path = env::var("VOTER_RAWS_DIR").unwrap_or_else(|_| "./storage/raws".to_string());
+  let resized_path =
+    env::var("VOTER_RESIZED_DIR").unwrap_or_else(|_| "./storage/resized".to_string());
+
+  let config = Config {
+    raws_path: raws_path.into(),
+    imports_path: imports_path.into(),
+    resized_path: resized_path.clone().into(),
+  };
+  let records = sqlx::query!(r#"SELECT id, filename, hash FROM images"#,)
+    .fetch_optional(&mut conn)
+    .await?;
+
+  for record in records {
+    let raw_image_path = config.raws_path.join(record.hash.to_string() + ".png");
+    info!("Resizing image: {}", &raw_image_path.clone().display());
+    resize_img(
+      &config,
+      &raw_image_path,
+      &record.hash.parse::<u64>().unwrap(),
+    )
+    .await?;
+  }
+  info!("Resizing Done");
+  Ok((Status::Ok, json!({ "success": true })))
+}
+
 async fn save_image(
   config: &Config,
   db: &SqlitePool,
@@ -282,21 +319,16 @@ async fn save_image(
   hash: u64,
 ) -> Result<()> {
   fs::copy(&original_image_path, &raw_image_path).await?;
+  resize_img(&config, &raw_image_path, &hash).await?;
+
+  let image_id = ulid::Ulid::new().to_string();
+  let hash_str = hash.to_string();
 
   let original_filename = original_image_path
     .file_name()
     .unwrap_or_default()
     .to_string_lossy()
     .to_string();
-
-  let resized_filename = format!("{hash}.jpg");
-  let resized_path = config.resized_path.join(&resized_filename);
-  let img = image::open(&raw_image_path)?;
-  let resized_img = img.resize_to_fill(1080, 1080, FilterType::Lanczos3);
-  resized_img.save(&resized_path)?;
-
-  let image_id = ulid::Ulid::new().to_string();
-  let hash_str = hash.to_string();
 
   let mut conn = db.acquire().await?;
   sqlx::query!(
@@ -307,6 +339,17 @@ async fn save_image(
   )
   .execute(&mut conn)
   .await?;
+
+  Ok(())
+}
+
+async fn resize_img(config: &Config, raw_image_path: &Path, hash: &u64) -> Result<()> {
+  let resized_filename = format!("{hash}.jpg");
+  let resized_path = config.resized_path.join(&resized_filename);
+  let img = image::open(&raw_image_path)?;
+
+  let resized_img = img.resize(1080, 1080, FilterType::Lanczos3);
+  resized_img.save(&resized_path)?;
 
   Ok(())
 }
